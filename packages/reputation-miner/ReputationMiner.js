@@ -665,31 +665,6 @@ class ReputationMiner {
     const [branchMask] = proof;
     let [, siblings] = proof;
 
-    // Trim the proof if needed
-    // How long should the proof be?
-
-    // function pow2ceil(v){
-    //     return Math.pow(2,Math.ceil(Math.log(v)/Math.log(2)))
-    // }
-    //
-    // function expectedProofLength(i, j){
-    //   let nextpower = pow2ceil(i);
-    //   let layers =0;
-    //   while (i!=0 && (j+1 > nextpower/2)){
-    //     i -= nextpower/2
-    //     j -= nextpower/2
-    //     layers +=1;
-    //     nextpower = pow2ceil(i);
-    //   }
-    //   return Math.log2(nextpower) + layers;
-    // }
-    // console.log('siblings length', siblings.length)
-    // console.log('jrhnnodes', submission[7])
-    // console.log('targetNode', targetNode);
-    // console.log('expectedProofLength', expectedProofLength(submission[7].toNumber(), targetNode.toNumber()))
-    // console.log('challengeRoundsCompleted', submission[3]);
-    // siblings = siblings.slice(siblings.length - expectedProofLength(submission[7].toNumber(), targetNode.toNumber()) + submission[3].toNumber() - 1);
-
     let proofEndingHash = await this.justificationTree.getImpliedRoot(
       targetNodeKey,
       this.justificationHashes[targetNodeKey].jhLeafValue,
@@ -743,8 +718,12 @@ class ReputationMiner {
     const repCycle = await this.getActiveRepCycle();
     const submission = await repCycle.getDisputeRounds(round, index);
     // console.log(submission);
-    const firstDisagreeIdx = submission[8];
-    const lastAgreeIdx = firstDisagreeIdx.sub(1);
+    let firstDisagreeIdx = submission[8];
+    let lastAgreeIdx = firstDisagreeIdx.sub(1);
+    // If this is called before the binary search has finished, these would be -1 and 0, respectively, which will throw errors
+    // when we try and pass -ve hex values. Instead, set them to values that will allow us to send a tx that will fail.
+    lastAgreeIdx = lastAgreeIdx.lt(0) ? ethers.utils.bigNumberify(0) : lastAgreeIdx;
+    firstDisagreeIdx = firstDisagreeIdx.lt(1) ? ethers.utils.bigNumberify(1) : firstDisagreeIdx;
     // console.log('getReputationUPdateLogEntry', lastAgreeIdx);
     // const logEntry = await repCycle.getReputationUpdateLogEntry(lastAgreeIdx.toString());
     // console.log('getReputationUPdateLogEntry done');
