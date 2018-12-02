@@ -100,6 +100,11 @@ contract IColony is ColonyDataTypes, IRecovery {
   /// @param _wad Amount to mint
   function mintTokens(uint256 _wad) public;
 
+  /// @notice Mint `_wad` amount of colony tokens and send to _dst. Secured function to authorised members
+  /// @param _dst Recipient of tokens
+  /// @param _wad Amount to mint
+  function mintTokensFor(address _dst, uint256 _wad) public;
+
   /// @notice Register colony's ENS label
   /// @param colonyName The label to register.
   /// @param orbitdb The path of the orbitDB database associated with the colony name

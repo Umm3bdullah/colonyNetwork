@@ -9,18 +9,31 @@ import {
   forwardTime,
   checkErrorRevert,
   checkErrorRevertEthers,
-  web3GetTransactionReceipt,
   makeReputationKey,
   makeReputationValue,
   currentBlock,
   getValidEntryNumber,
   submitAndForwardTimeToDispute,
+  runBinarySearch,
   getActiveRepCycle,
   advanceMiningCycleNoContest
 } from "../helpers/test-helper";
 
 import { giveUserCLNYTokens, giveUserCLNYTokensAndStake, setupFinalizedTask, fundColonyWithTokens } from "../helpers/test-data-generator";
-import { UINT256_MAX, WAD, MIN_STAKE, DEFAULT_STAKE, MINING_CYCLE_DURATION, DECAY_RATE, ZERO_ADDRESS } from "../helpers/constants";
+
+import {
+  UINT256_MAX,
+  WAD,
+  MIN_STAKE,
+  DEFAULT_STAKE,
+  INITIAL_FUNDING,
+  MANAGER_PAYOUT,
+  EVALUATOR_PAYOUT,
+  WORKER_PAYOUT,
+  MINING_CYCLE_DURATION,
+  DECAY_RATE,
+  ZERO_ADDRESS
+} from "../helpers/constants";
 
 import ReputationMiner from "../packages/reputation-miner/ReputationMiner";
 import MaliciousReputationMinerExtraRep from "../packages/reputation-miner/test/MaliciousReputationMinerExtraRep";
@@ -130,31 +143,14 @@ contract("ColonyNetworkMining", accounts => {
       assert.isTrue(round1.eq(round2), "Clients do not have submissions in the same round");
       const submission2before = await repCycle.getDisputeRounds(round2, idx2);
       assert.isTrue(
-        idx1
-          .sub(idx2)
-          .pow(2)
-          .eq(1),
+        idx1.sub(idx2).pow(2).eq(1), // eslint-disable-line prettier/prettier
         "Clients are not facing each other in this round"
       );
       if (submission2before[4] === "0x0000000000000000000000000000000000000000000000000000000000000000") {
         await client2.submitJustificationRootHash();
       }
-      // Loop while doing the binary search, checking we were successful at each point
-      // Binary search will error when it is complete.
-      let noError = true;
-      while (noError) {
-        let transactionObject;
-        transactionObject = await client1.respondToBinarySearchForChallenge(); // eslint-disable-line no-await-in-loop
-        let tx = await web3GetTransactionReceipt(transactionObject.hash); // eslint-disable-line no-await-in-loop
-        if (!tx.status) {
-          noError = false;
-        }
-        transactionObject = await client2.respondToBinarySearchForChallenge(); // eslint-disable-line no-await-in-loop
-        tx = await web3GetTransactionReceipt(transactionObject.hash); // eslint-disable-line no-await-in-loop
-        if (!tx.status) {
-          noError = false;
-        }
-      }
+
+      await runBinarySearch(client1, client2);
 
       await client1.confirmBinarySearchResult();
       await client2.confirmBinarySearchResult();
@@ -713,7 +709,7 @@ contract("ColonyNetworkMining", accounts => {
       let userLock2 = await tokenLocking.getUserLock(clny.address, OTHER_ACCOUNT2);
       assert.isTrue(userLock2[1].eq(DEFAULT_STAKE));
 
-      // We want badclient2 to submit the same hash as badclient for this test.
+      // We want badClient2 to submit the same hash as badClient for this test.
       badClient2 = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT2, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
         1,
@@ -822,30 +818,25 @@ contract("ColonyNetworkMining", accounts => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
 
-      await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny);
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
+      // Should be 5 updates: 1 for the previous mining cycle and 4 for the task.
       const repCycle = await getActiveRepCycle(colonyNetwork);
-
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and reputation updates for three task completions (manager, worker, evaluator);
-      // That's seven in total.
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
-      assert.equal(nInactiveLogEntries.toNumber(), 13);
+      assert.equal(nInactiveLogEntries.toNumber(), 5);
 
       await submitAndForwardTimeToDispute([goodClient, badClient], this);
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       const nSubmittedHashes = await repCycle.getNSubmittedHashes();
       assert.equal(nSubmittedHashes, 2);
+
       const submission = await repCycle.getDisputeRounds(0, 0);
       assert.equal(submission[4], "0x0000000000000000000000000000000000000000000000000000000000000000");
       await forwardTime(10, this); // This is just to ensure that the timestamps checked below will be different if JRH was submitted.
@@ -894,7 +885,7 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await accommodateChallengeAndInvalidateHash(this, goodClient, badClient);
       await repCycle.confirmNewHash(1);
@@ -934,7 +925,7 @@ contract("ColonyNetworkMining", accounts => {
 
         const righthash = await goodClient.getRootHash();
         const wronghash = await badClient.getRootHash();
-        assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+        assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
         await accommodateChallengeAndInvalidateHash(this, goodClient, badClient);
         repCycle = await getActiveRepCycle(colonyNetwork);
@@ -946,19 +937,16 @@ contract("ColonyNetworkMining", accounts => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
 
-      await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
       const repCycle = await getActiveRepCycle(colonyNetwork);
 
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and reputation updates for three task completions (manager, worker (skill and domain), evaluator);
-      // That's thirteen in total.
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
 
@@ -973,16 +961,19 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       const nSubmittedHashes = await repCycle.getNSubmittedHashes();
       assert.equal(nSubmittedHashes, 2);
+
       const submission = await repCycle.getDisputeRounds(0, 0);
       assert.equal(submission[4], "0x0000000000000000000000000000000000000000000000000000000000000000");
+
       await goodClient.submitJustificationRootHash();
       const submissionAfterJRHSubmitted = await repCycle.getDisputeRounds(0, 0);
       const jrh = await goodClient.justificationTree.getRootHash();
       assert.equal(submissionAfterJRHSubmitted[4], jrh);
+
       await badClient.submitJustificationRootHash();
       const badSubmissionAfterJRHSubmitted = await repCycle.getDisputeRounds(0, 1);
       const badJrh = await badClient.justificationTree.getRootHash();
@@ -996,8 +987,8 @@ contract("ColonyNetworkMining", accounts => {
       assert.equal(badSubmission[3].toNumber(), 1);
       assert.equal(badSubmission[8].toNumber(), 0);
       assert.equal(badSubmission[9].toNumber(), 28);
-      await goodClient.respondToBinarySearchForChallenge();
 
+      await goodClient.respondToBinarySearchForChallenge();
       goodSubmission = await repCycle.getDisputeRounds(0, 0);
       badSubmission = await repCycle.getDisputeRounds(0, 1);
       assert.equal(goodSubmission[3].toNumber(), 2);
@@ -1073,18 +1064,17 @@ contract("ColonyNetworkMining", accounts => {
     it("if an existing reputation's uniqueID is changed, that disagreement should be handled correctly", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
       const repCycle = await getActiveRepCycle(colonyNetwork);
 
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and reputation updates for three task completions (manager, worker (skill and domain), evaluator);
-      // That's thirteen in total.
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
 
@@ -1099,25 +1089,12 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
@@ -1152,18 +1129,17 @@ contract("ColonyNetworkMining", accounts => {
       // one of those submissions being eliminated.
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
       const repCycle = await getActiveRepCycle(colonyNetwork);
 
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and reputation updates for three task completions (manager, worker (skill and domain), evaluator);
-      // That's thirteen in total.
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
 
@@ -1178,25 +1154,12 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
@@ -1224,18 +1187,17 @@ contract("ColonyNetworkMining", accounts => {
     it("If respondToChallenge is attempted to be called multiple times, it should fail", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
       const repCycle = await getActiveRepCycle(colonyNetwork);
 
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and reputation updates for three task completions (manager, worker (skill and domain), evaluator);
-      // That's thirteen in total.
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
 
@@ -1249,25 +1211,12 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
@@ -1299,18 +1248,17 @@ contract("ColonyNetworkMining", accounts => {
     it("if a log entry is claimed to make a new update, but shouldn't, that disagreement should be handled correctly", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
       const repCycle = await getActiveRepCycle(colonyNetwork);
 
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and reputation updates for three task completions (manager, worker (skill and domain), evaluator);
-      // That's thirteen in total.
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
 
@@ -1325,25 +1273,12 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
@@ -1351,7 +1286,7 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.respondToChallenge();
       await checkErrorRevertEthers(badClient.respondToChallenge(), "colony-reputation-mining-proved-uid-inconsistent");
 
-      // Check badclient respondToChallenge failed
+      // Check badClient respondToChallenge failed
       const goodSubmissionAfterResponseToChallenge = await repCycle.getDisputeRounds(0, 0);
       const badSubmissionAfterResponseToChallenge = await repCycle.getDisputeRounds(0, 1);
       assert.equal(goodSubmissionAfterResponseToChallenge[3].sub(badSubmissionAfterResponseToChallenge[3]).toNumber(), 2);
@@ -1368,20 +1303,12 @@ contract("ColonyNetworkMining", accounts => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
 
-      await setupFinalizedTask({
-        colonyNetwork,
-        colony: metaColony,
-        managerPayout: 1000000000000,
-        evaluatorPayout: 1000000000000,
-        workerPayout: 1000000000000,
-        managerRating: 3,
-        workerRating: 3,
-        worker: accounts[3]
-      });
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: accounts[3] });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      const repCycle = await getActiveRepCycle(colonyNetwork);
 
       badClient = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
@@ -1390,7 +1317,7 @@ contract("ColonyNetworkMining", accounts => {
       );
       await badClient.initialise(colonyNetwork.address);
 
-      // This client gets the same root hash as goodCleint, but will submit the wrong newest reputation hash when
+      // This client gets the same root hash as goodClient, but will submit the wrong newest reputation hash when
       // it calls respondToChallenge.
       badClient2 = new MaliciousReputationMinerWrongNewestReputation(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
@@ -1405,25 +1332,16 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
 
       await checkErrorRevertEthers(badClient2.respondToChallenge(), "colony-reputation-mining-new-uid-incorrect");
+
       // Cleanup
       await accommodateChallengeAndInvalidateHash(this, goodClient, badClient);
+      const repCycle = await getActiveRepCycle(colonyNetwork);
       await repCycle.confirmNewHash(1);
     });
 
@@ -1448,7 +1366,7 @@ contract("ColonyNetworkMining", accounts => {
 
       let righthash = await goodClient.getRootHash();
       let wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await accommodateChallengeAndInvalidateHash(this, goodClient, badClient);
 
@@ -1478,7 +1396,7 @@ contract("ColonyNetworkMining", accounts => {
 
       righthash = await goodClient.getRootHash();
       wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await accommodateChallengeAndInvalidateHash(this, goodClient, badClient);
       repCycle = await getActiveRepCycle(colonyNetwork);
@@ -1526,20 +1444,12 @@ contract("ColonyNetworkMining", accounts => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
 
-      await setupFinalizedTask({
-        colonyNetwork,
-        colony: metaColony,
-        managerPayout: 1000000000000,
-        evaluatorPayout: 1000000000000,
-        workerPayout: 1000000000000,
-        managerRating: 3,
-        workerRating: 3,
-        worker: accounts[3]
-      });
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      const repCycle = await getActiveRepCycle(colonyNetwork);
 
       badClient = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
@@ -1553,23 +1463,13 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
 
       // Now get all the information needed to fire off a respondToChallenge call
+      const repCycle = await getActiveRepCycle(colonyNetwork);
       const [round, index] = await goodClient.getMySubmissionRoundAndIndex();
       const submission = await repCycle.getDisputeRounds(round, index);
       const firstDisagreeIdx = submission[8];
@@ -1618,20 +1518,11 @@ contract("ColonyNetworkMining", accounts => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
 
-      await setupFinalizedTask({
-        colonyNetwork,
-        colony: metaColony,
-        managerPayout: 1000000000000,
-        evaluatorPayout: 1000000000000,
-        workerPayout: 1000000000000,
-        managerRating: 3,
-        workerRating: 3,
-        worker: accounts[3]
-      });
+      await fundColonyWithTokens(metaColony, clny);
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      let repCycle = await getActiveRepCycle(colonyNetwork);
       await badClient.initialise(colonyNetwork.address);
 
       badClient.entryToFalsify = "-1";
@@ -1641,8 +1532,6 @@ contract("ColonyNetworkMining", accounts => {
 
       await advanceMiningCycleNoContest(colonyNetwork, this, goodClient);
 
-      repCycle = await getActiveRepCycle(colonyNetwork);
-
       badClient.entryToFalsify = "1";
 
       await submitAndForwardTimeToDispute([goodClient, badClient], this);
@@ -1650,23 +1539,13 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
 
       // Now get all the information needed to fire off a respondToChallenge call
+      const repCycle = await getActiveRepCycle(colonyNetwork);
       const [round, index] = await goodClient.getMySubmissionRoundAndIndex();
       const submission = await repCycle.getDisputeRounds(round, index);
       const firstDisagreeIdx = submission[8];
@@ -1721,19 +1600,12 @@ contract("ColonyNetworkMining", accounts => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
 
-      await setupFinalizedTask({
-        colonyNetwork,
-        colony: metaColony,
-        managerPayout: 1000000000000,
-        evaluatorPayout: 1000000000000,
-        workerPayout: 1000000000000,
-        managerRating: 3,
-        workerRating: 3
-      });
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      const repCycle = await getActiveRepCycle(colonyNetwork);
 
       badClient = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
@@ -1747,23 +1619,13 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
 
       // Now get all the information needed to fire off a respondToChallenge call
+      const repCycle = await getActiveRepCycle(colonyNetwork);
       const [round, index] = await goodClient.getMySubmissionRoundAndIndex();
       const submission = await repCycle.getDisputeRounds(round, index);
       const firstDisagreeIdx = submission[8];
@@ -1842,10 +1704,14 @@ contract("ColonyNetworkMining", accounts => {
 
     it("should prevent a hash from advancing if it might still get an opponent", async function advancingTest() {
       this.timeout(10000000);
-      assert.isTrue(accounts.length >= 8, "Not enough accounts for test to run");
+
+      assert.isTrue(accounts.length >= 11, "Not enough accounts for test to run");
       const accountsForTest = accounts.slice(3, 11);
+
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(8));
       for (let i = 0; i < 8; i += 1) {
         await giveUserCLNYTokensAndStake(colonyNetwork, accountsForTest[i], DEFAULT_STAKE); // eslint-disable-line no-await-in-loop
+        await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: accountsForTest[i] }); // eslint-disable-line no-await-in-loop
         // These have to be done sequentially because this function uses the total number of tasks as a proxy for getting the
         // right taskId, so if they're all created at once it messes up.
       }
@@ -1882,8 +1748,11 @@ contract("ColonyNetworkMining", accounts => {
       await accommodateChallengeAndInvalidateHash(this, clients[0], clients[1]);
       await accommodateChallengeAndInvalidateHash(this, clients[2], clients[3]);
       await accommodateChallengeAndInvalidateHash(this, clients[4], clients[5]);
-      await accommodateChallengeAndInvalidateHash(this, clients[0], clients[2]); // This is the first pairing in round 2
+
+      // This is the first pairing in round 2
+      await accommodateChallengeAndInvalidateHash(this, clients[0], clients[2]);
       await checkErrorRevert(accommodateChallengeAndInvalidateHash(this, clients[4]), "colony-reputation-mining-previous-dispute-round-not-complete");
+
       // Now clean up
       await accommodateChallengeAndInvalidateHash(this, clients[6], clients[7]);
       await accommodateChallengeAndInvalidateHash(this, clients[4], clients[6]);
@@ -1925,14 +1794,7 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       const [round, index] = await goodClient.getMySubmissionRoundAndIndex();
       const submission = await repCycle.getDisputeRounds(round, index);
@@ -2021,6 +1883,7 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
+      // Incomplete binary search
       await goodClient.respondToBinarySearchForChallenge();
       await badClient.respondToBinarySearchForChallenge();
       await badClient.respondToBinarySearchForChallenge();
@@ -2102,14 +1965,7 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
@@ -2207,6 +2063,11 @@ contract("ColonyNetworkMining", accounts => {
           is too ${args.word}`, async () => {
           await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
           await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
+
+          await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(2));
+          await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+          await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+
           await advanceMiningCycleNoContest(colonyNetwork, this);
 
           const repCycle = await getActiveRepCycle(colonyNetwork);
@@ -2230,27 +2091,14 @@ contract("ColonyNetworkMining", accounts => {
 
           await submitAndForwardTimeToDispute([badClient, badClient2], this);
 
-          const righthash = await badClient.getRootHash();
-          const wronghash = await badClient2.getRootHash();
-          assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+          const wronghash = await badClient.getRootHash();
+          const wronghash2 = await badClient2.getRootHash();
+          assert.notEqual(wronghash, wronghash2, "Hashes from clients are equal, surprisingly");
 
           await badClient2.submitJustificationRootHash();
           await badClient.submitJustificationRootHash();
 
-          await badClient2.respondToBinarySearchForChallenge();
-          await badClient.respondToBinarySearchForChallenge();
-
-          await badClient2.respondToBinarySearchForChallenge();
-          await badClient.respondToBinarySearchForChallenge();
-
-          await badClient2.respondToBinarySearchForChallenge();
-          await badClient.respondToBinarySearchForChallenge();
-
-          await badClient2.respondToBinarySearchForChallenge();
-          await badClient.respondToBinarySearchForChallenge();
-
-          await badClient2.respondToBinarySearchForChallenge();
-          await badClient.respondToBinarySearchForChallenge();
+          await runBinarySearch(badClient2, badClient);
 
           await goodClient.confirmBinarySearchResult();
           await badClient.confirmBinarySearchResult();
@@ -2306,15 +2154,7 @@ contract("ColonyNetworkMining", accounts => {
 
       const repCycle = await getActiveRepCycle(colonyNetwork);
 
-      await forwardTime(MINING_CYCLE_DURATION / 2, this);
-      for (let i = 0; i < clients.length; i += 1) {
-        // Doing these individually rather than in a big loop because with many instances of the EVM
-        // churning away at once, I *think* it's slower.
-        await clients[i].addLogContentsToReputationTree(); // eslint-disable-line no-await-in-loop
-        await clients[i].submitRootHash(); // eslint-disable-line no-await-in-loop
-        console.log(`Client ${i} of ${clients.length - 1} submitted JRH`); // eslint-disable-line no-console
-      }
-      await forwardTime(MINING_CYCLE_DURATION / 2, this);
+      await submitAndForwardTimeToDispute(clients, this);
 
       const nSubmittedHashes = await repCycle.getNSubmittedHashes();
       let nRemainingHashes = nSubmittedHashes.toNumber();
@@ -2347,25 +2187,14 @@ contract("ColonyNetworkMining", accounts => {
 
     it("should be able to process a large reputation update log", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(30));
       // TODO It would be so much better if we could do these in parallel, but until colonyNetwork#192 is fixed, we can't.
       for (let i = 0; i < 30; i += 1) {
-        await setupFinalizedTask( // eslint-disable-line
-          {
-            colonyNetwork,
-            colony: metaColony,
-            colonyToken: clny,
-            workerRating: 1,
-            managerPayout: 1,
-            evaluatorPayout: 1,
-            workerPayout: 1
-          }
-        );
+        await setupFinalizedTask({ colonyNetwork, colony: metaColony }); // eslint-disable-line no-await-in-loop
       }
 
-      // Complete this reputation cycle
+      // Complete two reputation cycles to process the log
       await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      // Do it again
       await advanceMiningCycleNoContest(colonyNetwork, this);
     });
 
@@ -2380,14 +2209,7 @@ contract("ColonyNetworkMining", accounts => {
       await goodClient.submitJustificationRootHash();
       await badClient.submitJustificationRootHash();
 
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
-      await badClient.respondToBinarySearchForChallenge();
-      await goodClient.respondToBinarySearchForChallenge();
+      await runBinarySearch(goodClient, badClient);
 
       await goodClient.confirmBinarySearchResult();
       await badClient.confirmBinarySearchResult();
@@ -2401,6 +2223,12 @@ contract("ColonyNetworkMining", accounts => {
     it("should cope if someone's existing reputation would go negative, setting it to zero instead", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
+
+      // Create reputation
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: MAIN_ACCOUNT });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: OTHER_ACCOUNT });
+
       badClient = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
         31,
@@ -2408,6 +2236,7 @@ contract("ColonyNetworkMining", accounts => {
       );
       await badClient.initialise(colonyNetwork.address);
 
+      // Send rep to 0
       await setupFinalizedTask({
         colonyNetwork,
         colony: metaColony,
@@ -2434,6 +2263,11 @@ contract("ColonyNetworkMining", accounts => {
     it("should cope if someone's new reputation would be negative, setting it to zero instead", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
+
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: MAIN_ACCOUNT });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: OTHER_ACCOUNT });
+
       badClient = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
         31,
@@ -2468,6 +2302,11 @@ contract("ColonyNetworkMining", accounts => {
     it("should cope if someone's reputation would be overflow, setting it to the maximum value instead", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
+
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(2));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: MAIN_ACCOUNT });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, worker: OTHER_ACCOUNT });
+
       badClient = new MaliciousReputationMinerExtraRep(
         { loader: contractLoader, minerAddress: OTHER_ACCOUNT, realProviderPort: REAL_PROVIDER_PORT, useJsTree },
         29,
@@ -2600,16 +2439,15 @@ contract("ColonyNetworkMining", accounts => {
 
     it("The reputation mining client should insert reputation updates from the log", async () => {
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
+
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      await giveUserCLNYTokens(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await giveUserCLNYTokens(colonyNetwork, OTHER_ACCOUNT2, DEFAULT_STAKE);
-      await advanceMiningCycleNoContest(colonyNetwork, this);
-
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and 4x reputation updates for three task completions (manager, worker (domain and skill), evaluator);
-      // That's thirteen in total.
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const repCycle = await getActiveRepCycle(colonyNetwork);
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
@@ -2642,7 +2480,7 @@ contract("ColonyNetworkMining", accounts => {
       // These should be:
       // 1. Colony-wide total reputation for metacolony's root skill
       key = makeReputationKey(metaColony.address, META_ROOT_SKILL);
-      value = makeReputationValue(DEFAULT_STAKE.muln(6).add(REWARD), 1);
+      value = makeReputationValue(REWARD.add(MANAGER_PAYOUT.add(EVALUATOR_PAYOUT).add(WORKER_PAYOUT).muln(3)).add(WAD.muln(300)), 1); // eslint-disable-line prettier/prettier
       assert.equal(client.reputations[key], value);
 
       // 2. Colony-wide total reputation for mining skill
@@ -2650,9 +2488,9 @@ contract("ColonyNetworkMining", accounts => {
       value = makeReputationValue(REWARD, 2);
       assert.equal(client.reputations[key], value);
 
-      // 3. Reputation reward for MAIN_ACCOUNT for being the manager for the tasks created by giveUserCLNYTokens
+      // 3. Reputation reward for MAIN_ACCOUNT for being the manager for the tasks created by setupFinalizedTask
       key = makeReputationKey(metaColony.address, META_ROOT_SKILL, MAIN_ACCOUNT);
-      value = makeReputationValue(DEFAULT_STAKE.muln(6).add(REWARD), 3);
+      value = makeReputationValue(REWARD.add(MANAGER_PAYOUT.add(EVALUATOR_PAYOUT).muln(3)), 3);
       assert.equal(client.reputations[key], value);
 
       // 4. Reputation reward for MAIN_ACCOUNT for submitting the previous reputation hash
@@ -2661,19 +2499,18 @@ contract("ColonyNetworkMining", accounts => {
       assert.equal(client.reputations[key], value);
 
       // 5. Reputation reward for OTHER_ACCOUNT2 for being the worker for the tasks created by giveUserCLNYTokens
-      // NB at the moment, the reputation reward for the worker is 0.
       key = makeReputationKey(metaColony.address, META_ROOT_SKILL, OTHER_ACCOUNT2);
-      value = makeReputationValue(0, 5);
+      value = makeReputationValue(WORKER_PAYOUT.muln(3).add(WAD.muln(300)), 5);
       assert.equal(client.reputations[key], value);
 
       // 6. Colony-wide total reputation for global skill task was in
       key = makeReputationKey(metaColony.address, GLOBAL_SKILL);
-      value = makeReputationValue(0, 6);
+      value = makeReputationValue(WORKER_PAYOUT.muln(3).add(WAD.muln(300)), 6);
       assert.equal(client.reputations[key], value);
 
       // 7. Worker reputation for global skill task was in
       key = makeReputationKey(metaColony.address, GLOBAL_SKILL, OTHER_ACCOUNT2);
-      value = makeReputationValue(0, 7);
+      value = makeReputationValue(WORKER_PAYOUT.muln(3).add(WAD.muln(300)), 7);
       assert.equal(client.reputations[key], value);
     });
 
@@ -2688,8 +2525,8 @@ contract("ColonyNetworkMining", accounts => {
 
       // 1 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
-      // Make sure there's funding for the task
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
+      await fundColonyWithTokens(metaColony, clny);
 
       // Do the task
       await setupFinalizedTask({
@@ -2707,12 +2544,10 @@ contract("ColonyNetworkMining", accounts => {
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      // The update log should contain the person being rewarded for the previous
-      // update cycle, and 2x4 reputation updates for the task completions (manager, worker (domain and skill), evaluator);
-      // That's 9 in total.
+      // Should be 5 updates: 1 for the previous mining cycle and 4 for the task.
       const repCycle = await getActiveRepCycle(colonyNetwork);
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
-      assert.equal(nInactiveLogEntries.toNumber(), 9);
+      assert.equal(nInactiveLogEntries.toNumber(), 5);
 
       await goodClient.addLogContentsToReputationTree();
 
@@ -2720,31 +2555,30 @@ contract("ColonyNetworkMining", accounts => {
       const MINING_SKILL = 3;
 
       const reputationProps = [
-        { id: 1, skillId: META_ROOT_SKILL, account: undefined, value: DEFAULT_STAKE.muln(2).add(REWARD).add(new BN("3000000000000")) }, // eslint-disable-line prettier/prettier
+        { id: 1, skillId: META_ROOT_SKILL, account: undefined, value: REWARD.add(new BN("3000000000000")) }, // eslint-disable-line prettier/prettier
         { id: 2, skillId: MINING_SKILL, account: undefined, value: REWARD },
-        { id: 3, skillId: META_ROOT_SKILL, account: MAIN_ACCOUNT, value: DEFAULT_STAKE.muln(2).add(REWARD).add(new BN("1000000000000")) }, // eslint-disable-line prettier/prettier
+        { id: 3, skillId: META_ROOT_SKILL, account: MAIN_ACCOUNT, value: REWARD.add(new BN("1000000000000")) }, // eslint-disable-line prettier/prettier
         { id: 4, skillId: MINING_SKILL, account: MAIN_ACCOUNT, value: REWARD },
         { id: 5, skillId: META_ROOT_SKILL, account: OTHER_ACCOUNT2, value: 1000000000000 },
-        { id: 6, skillId: 1, account: undefined, value: 1000000000000 },
-        { id: 7, skillId: 1, account: OTHER_ACCOUNT2, value: 0 },
-        { id: 8, skillId: META_ROOT_SKILL, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 6, skillId: META_ROOT_SKILL, account: OTHER_ACCOUNT, value: 1000000000000 },
 
-        { id: 9, skillId: 9, account: undefined, value: 1000000000000 },
-        { id: 10, skillId: 8, account: undefined, value: 1000000000000 },
-        { id: 11, skillId: 7, account: undefined, value: 1000000000000 },
-        { id: 12, skillId: 6, account: undefined, value: 1000000000000 },
-        { id: 13, skillId: 5, account: undefined, value: 1000000000000 },
-        { id: 14, skillId: 4, account: undefined, value: 1000000000000 },
-        { id: 15, skillId: 10, account: undefined, value: 1000000000000 },
+        { id: 7, skillId: 9, account: undefined, value: 1000000000000 },
+        { id: 8, skillId: 8, account: undefined, value: 1000000000000 },
+        { id: 9, skillId: 7, account: undefined, value: 1000000000000 },
+        { id: 10, skillId: 6, account: undefined, value: 1000000000000 },
+        { id: 11, skillId: 5, account: undefined, value: 1000000000000 },
+        { id: 12, skillId: 4, account: undefined, value: 1000000000000 },
+        { id: 13, skillId: 1, account: undefined, value: 1000000000000 },
+        { id: 14, skillId: 10, account: undefined, value: 1000000000000 },
 
-        { id: 16, skillId: 9, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 17, skillId: 8, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 18, skillId: 7, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 19, skillId: 6, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 20, skillId: 5, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 21, skillId: 4, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 22, skillId: 1, account: OTHER_ACCOUNT, value: 1000000000000 },
-        { id: 23, skillId: 10, account: OTHER_ACCOUNT, value: 1000000000000 }
+        { id: 15, skillId: 9, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 16, skillId: 8, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 17, skillId: 7, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 18, skillId: 6, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 19, skillId: 5, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 20, skillId: 4, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 21, skillId: 1, account: OTHER_ACCOUNT, value: 1000000000000 },
+        { id: 22, skillId: 10, account: OTHER_ACCOUNT, value: 1000000000000 }
       ];
 
       assert.equal(Object.keys(goodClient.reputations).length, reputationProps.length);
@@ -2767,25 +2601,17 @@ contract("ColonyNetworkMining", accounts => {
 
       // 1 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
-      // Do some tasks
       await giveUserCLNYTokensAndStake(colonyNetwork, MAIN_ACCOUNT, DEFAULT_STAKE);
       await giveUserCLNYTokensAndStake(colonyNetwork, OTHER_ACCOUNT, DEFAULT_STAKE);
-      await setupFinalizedTask({
-        colonyNetwork,
-        colony: metaColony,
-        skillId: 10,
-        managerPayout: 1000000000000,
-        evaluatorPayout: 1000000000000,
-        workerPayout: 1000000000000,
-        workerRating: 2,
-        manager: MAIN_ACCOUNT,
-        worker: OTHER_ACCOUNT,
-        evaluator: accounts[2]
-      });
+
+      await fundColonyWithTokens(metaColony, clny, INITIAL_FUNDING.muln(3));
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony });
+      await setupFinalizedTask({ colonyNetwork, colony: metaColony, skillId: 10 });
 
       await advanceMiningCycleNoContest(colonyNetwork, this);
 
-      // Get current cycle
+      // Should be 13 updates: 1 for the previous mining cycle and 3x4 for the tasks.
       const repCycle = await getActiveRepCycle(colonyNetwork);
       const nInactiveLogEntries = await repCycle.getReputationUpdateLogLength();
       assert.equal(nInactiveLogEntries.toNumber(), 13);
@@ -2801,7 +2627,7 @@ contract("ColonyNetworkMining", accounts => {
 
       const righthash = await goodClient.getRootHash();
       const wronghash = await badClient.getRootHash();
-      assert.isTrue(righthash !== wronghash, "Hashes from clients are equal, surprisingly");
+      assert.notEqual(righthash, wronghash, "Hashes from clients are equal, surprisingly");
 
       await accommodateChallengeAndInvalidateHash(this, goodClient, badClient);
       await repCycle.confirmNewHash(1);

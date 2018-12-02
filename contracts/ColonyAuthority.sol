@@ -32,6 +32,8 @@ contract ColonyAuthority is CommonAuthority {
     setFounderRoleCapability(colony, "bootstrapColony(address[],int256[])");
     // Mint tokens
     setFounderRoleCapability(colony, "mintTokens(uint256)");
+    // Mint tokens for user
+    setFounderRoleCapability(colony, "mintTokensFor(address,uint256)");
     // Add global skill
     setFounderRoleCapability(colony, "addGlobalSkill(uint256)");
     // Transfer founder role
