@@ -23,6 +23,7 @@ import { createSignatures, createSignaturesTrezor, web3GetAccounts } from "./tes
 const { setupColonyVersionResolver } = require("../helpers/upgradable-contracts");
 
 const IColony = artifacts.require("IColony");
+const IMetaColony = artifacts.require("IMetaColony");
 const ITokenLocking = artifacts.require("ITokenLocking");
 const Token = artifacts.require("Token");
 const TokenAuthority = artifacts.require("./TokenAuthority");
@@ -284,8 +285,9 @@ export async function giveUserCLNYTokens(colonyNetwork, address, amount) {
   const clnyAddress = await metaColony.getToken();
   const clny = await Token.at(clnyAddress);
 
+  const accounts = await web3GetAccounts();
   await clny.mint(amount, { from: accounts[11] });
-  await clny.transfer(address, { from: accounts[11] });
+  await clny.transfer(address, amount, { from: accounts[11] });
 }
 
 export async function giveUserCLNYTokensAndStake(colonyNetwork, user, _amount) {
